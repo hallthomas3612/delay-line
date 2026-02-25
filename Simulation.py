@@ -1024,6 +1024,94 @@ def residuals(theta, img_path_light , K_by_mirror, reflec_cam):
     # Stack everything
     return np.concatenate([r_aruco, r_exit_angle, r_exit_height, r_refl_pts])
 
+def residuals_with_sharedY(theta_i, y_shared, img_path_light, K_by_mirror, reflec_cam):
+    M1x, M2x, M3x, M4x, M1a, M2a, M3a, M4a = theta_i
+    M1y, M2y, M3y, M4y = y_shared
+
+    # --- ArUco residuals ---
+    r_aruco_px = aruco_pixel_residuals(
+        M1x, M2x, M3x, M4x,
+        M1a, M2a, M3a, M4a,
+        img_path_light
+    )
+    r_aruco = r_aruco_px / SIGMA_PX
+
+    # --- Exit alignment ---
+    g = simulation_identifier(
+        M1x, M1y, M2x, M2y, M3x, M3y, M4x, M4y,
+        M1a, M2a, M3a, M4a
+    )
+
+    # --- Reflections from sim (uses shared y’s too) ---
+    refl_sim = simulation_reflec(
+        M1x, M1y, M2x, M2y, M3x, M3y, M4x, M4y,
+        M1a, M2a, M3a, M4a
+    )
+    reflec_sim_world = refl_sim[1:-1]
+
+    refl_sim_px = []
+    for (xw, yw) in reflec_sim_world:
+        u, v = sim_to_px_reflec(xw, yw)
+        refl_sim_px.append([float(u), float(v)])
+
+    refl_sim_px_grouped = {k: [] for k in rois.keys()}
+    for u, v in refl_sim_px:
+        for name, (x0, y0, x1, y1) in rois.items():
+            if x0 <= u <= x1 and y0 <= v <= y1:
+                refl_sim_px_grouped[name].append([u, v])
+                break
+
+    r_refl = []
+    for name in rois.keys():
+        r_refl.append(
+            refl_residuals_fixedK(
+                reflec_cam[name],
+                refl_sim_px_grouped[name],
+                K_by_mirror[name]
+            )
+        )
+    r_refl_pts = np.concatenate(r_refl) if len(r_refl) else np.array([], float)
+
+    r_exit_angle  = np.array([(g[0] - EXIT_TARGET) / SIGMA_EXIT], dtype=float)
+    r_exit_height = np.array([(g[2]) / SIGMA_EXIT], dtype=float)
+
+    return np.concatenate([r_aruco, r_exit_angle, r_exit_height, r_refl_pts])
+
+
+def pack_params(y_shared, thetas_by_img):
+    # y_shared: shape (4,)
+    # thetas_by_img: shape (N, 8)
+    return np.concatenate([np.asarray(y_shared, float).ravel(),
+                           np.asarray(thetas_by_img, float).ravel()])
+
+def unpack_params(p, N):
+    y_shared = p[:4]
+    rest = p[4:]
+    thetas = rest.reshape(N, 8)   # each row is theta_i
+    return y_shared, thetas
+
+def residuals_bundle(p, frames):
+    """
+    p = [M1y,M2y,M3y,M4y, theta_0(8), theta_1(8), ..., theta_{N-1}(8)]
+    frames = list of dicts with img_path_light, K_by_mirror, reflec_cam
+    """
+    N = len(frames)
+    y_shared, thetas = unpack_params(p, N)
+
+    all_r = []
+    for i, f in enumerate(frames):
+        r_i = residuals_with_sharedY(
+            theta_i=thetas[i],
+            y_shared=y_shared,
+            img_path_light=f["img_path_light"],
+            K_by_mirror=f["K_by_mirror"],
+            reflec_cam=f["reflec_cam"],
+        )
+        all_r.append(np.asarray(r_i, float).ravel())
+
+    return np.concatenate(all_r) if all_r else np.array([], float)
+
+
 def group_aruco_centers_by_mirror(centers12):
     """
     centers12: list of 12 (x,y) points sorted by ArUco ID (0..11)
@@ -1165,4 +1253,3 @@ def group_aruco_centers_by_mirror(centers12):
             out[m].append(p)
 
     return out
-
